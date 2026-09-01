@@ -49,6 +49,22 @@ export const URL_CONFIGURABLE_PROVIDERS = ['Ollama', 'LMStudio', 'OpenAILike'];
  */
 export const LOCAL_PROVIDERS = ['LMStudio', 'Ollama'];
 
+/**
+ * Providers that were historically treated as LOCAL (and therefore disabled
+ * by default) but have since gained a built-in code-level cloud fallback.
+ *
+ * Because any visitor who opened the site before this migration already has
+ * { provider_settings: { OpenAILike: { settings: { enabled: false } } } }
+ * persisted in their localStorage, a blind "apply saved settings" would
+ * overwrite the new default (= enabled).  We therefore treat providers in
+ * this set specially during load: if the saved state says "disabled" but
+ * the provider is no longer in LOCAL_PROVIDERS, we reset it to enabled.
+ *
+ * This avoids the user having to clear their browser storage manually
+ * after every upgrade that promotes a provider to "works out of the box".
+ */
+const RECENTLY_PROMOTED_FROM_LOCAL_TO_BUILTIN = ['OpenAILike'];
+
 export type ProviderSetting = Record<string, IProviderConfig>;
 
 // Simplified shortcuts store with only theme toggle
@@ -76,6 +92,10 @@ export const shortcutsStore = map<Shortcuts>({
 // Create a single key for provider settings
 const PROVIDER_SETTINGS_KEY = 'provider_settings';
 const AUTO_ENABLED_KEY = 'auto_enabled_providers';
+// Bump this version number whenever we change the "default enabled" strategy
+// so that stale localStorage entries get re-evaluated against the new rules.
+const SETTINGS_SCHEMA_VERSION = 2;
+const SETTINGS_SCHEMA_VERSION_KEY = 'provider_settings_schema_version';
 
 // Add this helper function at the top of the file
 const isBrowser = typeof window !== 'undefined';
@@ -109,34 +129,69 @@ const fetchConfiguredProviders = async (): Promise<ConfiguredProvider[]> => {
 const getInitialProviderSettings = (): ProviderSetting => {
   const initialSettings: ProviderSetting = {};
 
-  // Start with default settings
+  // 1) Start with fresh defaults based on current rules
   PROVIDER_LIST.forEach((provider) => {
     initialSettings[provider.name] = {
       ...provider,
       settings: {
         // Local providers are disabled by default (need local daemon running).
-        // All other providers (including OpenAILike now that it ships with a
-        // built-in cloud-backed default config) are enabled out of the box.
+        // All other providers are enabled out of the box.
         enabled: !LOCAL_PROVIDERS.includes(provider.name),
       },
     };
   });
 
-  // Only try to load from localStorage in the browser
+  // 2) Handle localStorage migration + selective override
   if (isBrowser) {
-    const savedSettings = localStorage.getItem(PROVIDER_SETTINGS_KEY);
+    const storedVersion = Number(localStorage.getItem(SETTINGS_SCHEMA_VERSION_KEY) || '0');
+    const schemaChanged = !Number.isFinite(storedVersion) || storedVersion < SETTINGS_SCHEMA_VERSION;
 
-    if (savedSettings) {
+    const savedSettingsRaw = localStorage.getItem(PROVIDER_SETTINGS_KEY);
+    const hasSavedSettings = savedSettingsRaw !== null;
+
+    // On a schema bump, forcibly reset the persisted settings for providers
+    // that were promoted from "local-only" to "has built-in cloud fallback".
+    const promotedProvidersNeedingReset = new Set<string>(
+      schemaChanged ? RECENTLY_PROMOTED_FROM_LOCAL_TO_BUILTIN : [],
+    );
+
+    if (hasSavedSettings) {
       try {
-        const parsed = JSON.parse(savedSettings);
-        Object.entries(parsed).forEach(([key, value]) => {
-          if (initialSettings[key]) {
-            initialSettings[key].settings = (value as IProviderConfig).settings;
+        const parsed = JSON.parse(savedSettingsRaw) as Record<string, IProviderConfig>;
+
+        for (const [name, saved] of Object.entries(parsed)) {
+          if (!initialSettings[name]) continue;
+
+          const wasPromoted = promotedProvidersNeedingReset.has(name);
+          const savedEnabled = saved?.settings?.enabled;
+
+          // Apply saved override ONLY if:
+          //   a) provider was NOT recently promoted, OR
+          //   b) the user explicitly turned it ON (we never want to undo that)
+          //
+          // In other words: if a promoted provider shows up as saved=disabled,
+          // treat that as legacy and keep the new default (= enabled).
+          if (!wasPromoted || savedEnabled === true) {
+            initialSettings[name].settings = { ...initialSettings[name].settings, ...saved.settings };
           }
-        });
+        }
+
+        // Bump the stored schema version so migration only runs once.
+        if (schemaChanged) {
+          try {
+            localStorage.setItem(SETTINGS_SCHEMA_VERSION_KEY, String(SETTINGS_SCHEMA_VERSION));
+            // Persist the migrated settings immediately so reloads don't re-migrate
+            localStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(initialSettings));
+          } catch { /* storage write failures are non-fatal */ }
+        }
       } catch (error) {
-        console.error('Error parsing saved provider settings:', error);
+        console.error('Error parsing saved provider settings (migration aborted for this load):', error);
       }
+    } else {
+      // Brand-new user — record the schema version immediately.
+      try {
+        localStorage.setItem(SETTINGS_SCHEMA_VERSION_KEY, String(SETTINGS_SCHEMA_VERSION));
+      } catch { /* ignore */ }
     }
   }
 
