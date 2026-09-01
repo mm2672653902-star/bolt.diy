@@ -14,8 +14,8 @@ export interface Shortcut {
   metaKey?: boolean;
   ctrlOrMetaKey?: boolean;
   action: () => void;
-  description?: string; // Description of what the shortcut does
-  isPreventDefault?: boolean; // Whether to prevent default browser behavior
+  description?: string;
+  isPreventDefault?: boolean;
 }
 
 export interface Shortcuts {
@@ -23,8 +23,31 @@ export interface Shortcuts {
   toggleTerminal: Shortcut;
 }
 
+/**
+ * Providers that allow custom base URL editing in the UI settings panel.
+ * OpenAILike is included here because the user may want to override the
+ * built-in TokenRhythm default with another OpenAI-compatible endpoint.
+ */
 export const URL_CONFIGURABLE_PROVIDERS = ['Ollama', 'LMStudio', 'OpenAILike'];
-export const LOCAL_PROVIDERS = ['OpenAILike', 'LMStudio', 'Ollama'];
+
+/**
+ * LOCAL_PROVIDERS:
+ * - Require a locally running daemon (Ollama / LMStudio).
+ * - Have connection-status indicators (green/red dot) in the Provider combobox.
+ * - Are DISABLED by default because they depend on the user having
+ *   local software running — the app can't use them "out of the box".
+ *
+ * IMPORTANT: OpenAILike MUST NOT be in this list.
+ *
+ *   OpenAILike now ships with a built-in cloud provider fallback
+ *   (TokenRhythm / 基元律动) so it works immediately on any device,
+ *   including mobile — there is no local daemon requirement.
+ *   Putting OpenAILike in LOCAL_PROVIDERS caused it to be disabled by
+ *   default in settings.ts -> getInitialProviderSettings(), which made
+ *   the provider invisible in the front-end dropdown even though the
+ *   LLMManager had fully registered it.
+ */
+export const LOCAL_PROVIDERS = ['LMStudio', 'Ollama'];
 
 export type ProviderSetting = Record<string, IProviderConfig>;
 
@@ -91,7 +114,9 @@ const getInitialProviderSettings = (): ProviderSetting => {
     initialSettings[provider.name] = {
       ...provider,
       settings: {
-        // Local providers should be disabled by default
+        // Local providers are disabled by default (need local daemon running).
+        // All other providers (including OpenAILike now that it ships with a
+        // built-in cloud-backed default config) are enabled out of the box.
         enabled: !LOCAL_PROVIDERS.includes(provider.name),
       },
     };
@@ -141,11 +166,6 @@ const autoEnableConfiguredProviders = async () => {
         const currentProvider = currentSettings[name];
 
         if (currentProvider) {
-          /*
-           * Only auto-enable if:
-           * 1. Provider is not already enabled, AND
-           * 2. Either we haven't saved settings yet (first time) OR provider was previously auto-enabled
-           */
           const hasUserSettings = savedSettings !== null;
           const wasAutoEnabled = previouslyAutoEnabled.includes(name);
           const shouldAutoEnable = !currentProvider.settings.enabled && (!hasUserSettings || wasAutoEnabled);
@@ -166,13 +186,9 @@ const autoEnableConfiguredProviders = async () => {
     });
 
     if (hasChanges) {
-      // Update the store
       providersStore.set(currentSettings);
-
-      // Save to localStorage
       localStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(currentSettings));
 
-      // Update the auto-enabled providers list
       const allAutoEnabled = [...new Set([...previouslyAutoEnabled, ...newlyAutoEnabled])];
       localStorage.setItem(AUTO_ENABLED_KEY, JSON.stringify(allAutoEnabled));
 
@@ -190,7 +206,6 @@ export const initializeProviders = autoEnableConfiguredProviders;
 
 // Initialize providers when the module loads (in browser only)
 if (isBrowser) {
-  // Use a small delay to ensure DOM and other resources are ready
   setTimeout(() => {
     autoEnableConfiguredProviders();
   }, 100);
@@ -200,7 +215,6 @@ if (isBrowser) {
 export const updateProviderSettings = (provider: string, settings: ProviderSetting) => {
   const currentSettings = providersStore.get();
 
-  // Create new provider config with updated settings
   const updatedProvider = {
     ...currentSettings[provider],
     settings: {
@@ -209,14 +223,11 @@ export const updateProviderSettings = (provider: string, settings: ProviderSetti
     },
   };
 
-  // Update the store with new settings
   providersStore.setKey(provider, updatedProvider);
 
-  // Save to localStorage
   const allSettings = providersStore.get();
   localStorage.setItem(PROVIDER_SETTINGS_KEY, JSON.stringify(allSettings));
 
-  // If this is a local provider, update the auto-enabled tracking
   if (LOCAL_PROVIDERS.includes(provider) && updatedProvider.settings.enabled !== undefined) {
     updateAutoEnabledTracking(provider, updatedProvider.settings.enabled);
   }
@@ -233,13 +244,11 @@ const updateAutoEnabledTracking = (providerName: string, isEnabled: boolean) => 
     const currentAutoEnabled = autoEnabledProviders ? JSON.parse(autoEnabledProviders) : [];
 
     if (isEnabled) {
-      // If user enables provider, add to auto-enabled list (for future detection)
       if (!currentAutoEnabled.includes(providerName)) {
         currentAutoEnabled.push(providerName);
         localStorage.setItem(AUTO_ENABLED_KEY, JSON.stringify(currentAutoEnabled));
       }
     } else {
-      // If user disables provider, remove from auto-enabled list (respect user choice)
       const updatedAutoEnabled = currentAutoEnabled.filter((name: string) => name !== providerName);
       localStorage.setItem(AUTO_ENABLED_KEY, JSON.stringify(updatedAutoEnabled));
     }
@@ -348,7 +357,6 @@ const getInitialTabConfiguration = (): TabWindowConfig => {
       return defaultConfig;
     }
 
-    // Ensure proper typing of loaded configuration
     return {
       userTabs: parsed.userTabs.filter((tab: TabVisibilityConfig): tab is UserTabConfig => tab.window === 'user'),
     };
@@ -358,11 +366,8 @@ const getInitialTabConfiguration = (): TabWindowConfig => {
   }
 };
 
-// console.log('Initial tab configuration:', getInitialTabConfiguration());
-
 export const tabConfigurationStore = map<TabWindowConfig>(getInitialTabConfiguration());
 
-// Helper function to reset tab configuration
 export const resetTabConfiguration = () => {
   const defaultConfig: TabWindowConfig = {
     userTabs: DEFAULT_TAB_CONFIG.filter((tab): tab is UserTabConfig => tab.window === 'user'),
@@ -372,7 +377,6 @@ export const resetTabConfiguration = () => {
   localStorage.setItem('bolt_tab_configuration', JSON.stringify(defaultConfig));
 };
 
-// First, let's define the SettingsStore interface
 interface SettingsStore {
   isOpen: boolean;
   selectedTab: string;
@@ -383,19 +387,19 @@ interface SettingsStore {
 
 export const useSettingsStore = create<SettingsStore>((set) => ({
   isOpen: false,
-  selectedTab: 'user', // Default tab
+  selectedTab: 'user',
 
   openSettings: () => {
     set({
       isOpen: true,
-      selectedTab: 'user', // Always open to user tab
+      selectedTab: 'user',
     });
   },
 
   closeSettings: () => {
     set({
       isOpen: false,
-      selectedTab: 'user', // Reset to user tab when closing
+      selectedTab: 'user',
     });
   },
 
